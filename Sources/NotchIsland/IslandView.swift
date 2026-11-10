@@ -74,9 +74,13 @@ struct CompactView: View {
     @ViewBuilder private var left: some View {
         let slots = model.slots
         if let banner = model.banner {
-            Image(systemName: banner.icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(banner.tint)
+            if let image = banner.image {
+                Image(nsImage: image).resizable().frame(width: 20, height: 20)
+            } else {
+                Image(systemName: banner.icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(banner.tint)
+            }
         } else if slots.count >= 2 {
             leading(slots[1])
         } else if let only = slots.first {
@@ -118,12 +122,23 @@ struct CompactView: View {
         switch slot {
         case .custom(let activity):
             symbol(activity.icon, activity.tint)
+        case .call:
+            symbol("phone.fill", .green)
         case .clock:
             symbol(model.stopwatchStart != nil ? "stopwatch" : "timer", .orange)
         case .event:
             symbol("calendar", .red)
         case .music:
             ArtworkView(model: model, side: model.notch.height - 12)
+                .overlay {
+                    if !model.isPlaying {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: (model.notch.height - 12) * 0.22, style: .continuous)
+                                .fill(.black.opacity(0.55))
+                            Image(systemName: "pause.fill").font(.system(size: 11, weight: .bold))
+                        }
+                    }
+                }
         }
     }
 
@@ -146,6 +161,13 @@ struct CompactView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
+        case .call(let call):
+            Text(call.start, style: .timer)
+                .font(.system(size: 13, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.green)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         case .clock:
             ClockText(model: model)
                 .font(.system(size: 13, weight: .semibold))
@@ -165,8 +187,14 @@ struct CompactView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.7)
         case .music:
-            EqualizerBars(active: model.isPlaying)
-                .frame(width: 16, height: 14)
+            if model.isPlaying {
+                EqualizerBars(active: true)
+                    .frame(width: 16, height: 14)
+            } else {
+                Image(systemName: "pause.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.75))
+            }
         }
     }
 }
@@ -183,9 +211,18 @@ struct ExpandedView: View {
                 ActivityRow(model: model, activity: activity)
             }
             musicRow
-            Divider().overlay(Color.white.opacity(0.12))
-            clockRow
-            if let event = model.nextEvent { eventRow(event) }
+            if model.showsClockRow {
+                Divider().overlay(Color.white.opacity(0.12))
+                clockRow
+            }
+            if let stats = model.stats {
+                Divider().overlay(Color.white.opacity(0.12))
+                StatsRow(stats: stats)
+            }
+            if let call = model.call { callRow(call) }
+            if let event = model.nextEvent { eventRow(event, symbol: "calendar", tint: .red) }
+            if let reminder = model.nextReminder { eventRow(reminder, symbol: "checklist", tint: .orange) }
+            if !model.unread.isEmpty { unreadRow }
             if model.hasIndicators { privacyRow }
             Spacer(minLength: 0)
         }
@@ -280,9 +317,41 @@ struct ExpandedView: View {
 
     // MARK: Calendar and privacy
 
-    private func eventRow(_ event: UpcomingEvent) -> some View {
+    private func callRow(_ call: OngoingCall) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "calendar").foregroundStyle(.red)
+            Image(systemName: "phone.fill").foregroundStyle(.green)
+            Text("Görüşme · \(call.app)")
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+            Spacer()
+            Text(call.start, style: .timer)
+                .font(.system(size: 12, weight: .semibold))
+                .monospacedDigit()
+                .foregroundStyle(.green)
+        }
+        .frame(height: 20)
+    }
+
+    /// App icons with their unread counts, read from the Dock.
+    private var unreadRow: some View {
+        HStack(spacing: 12) {
+            ForEach(model.unread) { badge in
+                HStack(spacing: 5) {
+                    Image(nsImage: badge.icon).resizable().frame(width: 20, height: 20)
+                    Text(badge.count)
+                        .font(.system(size: 12, weight: .semibold))
+                        .monospacedDigit()
+                }
+                .help(badge.name)
+            }
+            Spacer()
+        }
+        .frame(height: 24)
+    }
+
+    private func eventRow(_ event: UpcomingEvent, symbol: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(tint)
             Text(event.title)
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
@@ -314,6 +383,59 @@ struct ExpandedView: View {
         .foregroundStyle(.white.opacity(0.7))
         .lineLimit(1)
         .frame(height: 18)
+    }
+}
+
+/// System figures: CPU, GPU, memory, disk and network.
+struct StatsRow: View {
+    var stats: SystemStats
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            tile("CPU", percent(stats.cpu), level: stats.cpu)
+            if let gpu = stats.gpu { tile("GPU", percent(gpu), level: gpu) }
+            let memory = stats.memoryTotal > 0 ? Double(stats.memoryUsed) / Double(stats.memoryTotal) : 0
+            tile("BELLEK", gigabytes(Double(stats.memoryUsed)), level: memory)
+            if let free = stats.diskFree, let total = stats.diskTotal, total > 0 {
+                tile("DİSK BOŞ", gigabytes(Double(free)), level: 1 - Double(free) / Double(total))
+            }
+            if let temperature = stats.temperature {
+                // 30 °C reads as empty and 100 °C as full, so the bar turns yellow near 72 °C and red near 90 °C.
+                tile("ISI", "\(Int(temperature.rounded()))°", level: (temperature - 30) / 70)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("AĞ").font(.system(size: 9, weight: .medium)).foregroundStyle(.white.opacity(0.5))
+                Text("↓ " + rate(stats.down))
+                Text("↑ " + rate(stats.up))
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: 40, alignment: .top)
+    }
+
+    private func tile(_ label: String, _ value: String, level: Double) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.system(size: 9, weight: .medium)).foregroundStyle(.white.opacity(0.5))
+            Text(value).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+            LevelBar(level: level, tint: level < 0.6 ? .green : level < 0.85 ? .yellow : .red).frame(height: 3)
+        }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func percent(_ value: Double) -> String { "%\(Int((value * 100).rounded()))" }
+
+    private func gigabytes(_ bytes: Double) -> String {
+        let value = bytes / 1_073_741_824
+        return value >= 100 ? String(format: "%.0f GB", value) : String(format: "%.1f GB", value)
+    }
+
+    private func rate(_ bytesPerSecond: Double) -> String {
+        if bytesPerSecond >= 1_048_576 { return String(format: "%.1f MB/s", bytesPerSecond / 1_048_576) }
+        return String(format: "%.0f KB/s", bytesPerSecond / 1024)
     }
 }
 

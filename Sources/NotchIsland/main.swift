@@ -17,10 +17,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = IslandModel()
     private var panel: IslandPanel!
     private var music: MusicController!
-    private var youtube: YouTubeController!
+    private var browser: BrowserController!
+    private var players: PlayerPoller!
+    private var unread: UnreadMonitor!
+    private var reminders: ReminderMonitor!
+    private var bambu: BambuMonitor!
+    private var stats: StatsMonitor!
     private var power: PowerMonitor!
     private var privacy: PrivacyMonitor!
     private var volume: VolumeMonitor!
+    private var volumeKeys: VolumeKeys!
     private var keyboard: KeyboardMonitor!
     private var network: NetworkMonitor!
     private var calendar: CalendarMonitor!
@@ -54,14 +60,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
         music = MusicController(model: model)
-        youtube = YouTubeController(model: model)
+        browser = BrowserController(model: model)
+        players = PlayerPoller(model: model)
+        unread = UnreadMonitor(model: model)
+        reminders = ReminderMonitor(model: model)
+        bambu = BambuMonitor(model: model)
+        Commands.onBambuReload = { [weak self] in self?.bambu.reload() }
+        stats = StatsMonitor(model: model)
         power = PowerMonitor(model: model)
         privacy = PrivacyMonitor(model: model)
         volume = VolumeMonitor(model: model)
+        volumeKeys = VolumeKeys(volume: volume)
         keyboard = KeyboardMonitor(model: model)
         network = NetworkMonitor(model: model)
         calendar = CalendarMonitor(model: model)
-        model.onMusicCommand = { [weak self] command in self?.music.send(command) }
+        model.onMusicCommand = { [weak self] command in
+            guard let self, let source = self.model.track?.source else { return }
+            if self.players.handles(source) {
+                self.players.send(command)
+            } else {
+                self.music.send(command)
+            }
+        }
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(command(_:)), name: Commands.notification, object: nil)
@@ -119,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if hoverTicks >= 3, !model.expanded {
                 model.expanded = true
                 music.refreshPosition()
+                stats.refresh()
             }
         } else {
             hoverTicks = 0
@@ -131,16 +152,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.delegate = self
-        let login = NSMenuItem(title: "Girişte Başlat", action: #selector(toggleLogin(_:)), keyEquivalent: "")
-        login.target = self
-        menu.addItem(login)
-        let events = NSMenuItem(title: "Takvimi Göster", action: #selector(toggleCalendar(_:)), keyEquivalent: "")
-        events.target = self
-        menu.addItem(events)
+        let toggles: [(String, Selector)] = [
+            ("Girişte Başlat", #selector(toggleLogin(_:))),
+            ("Takvimi Göster", #selector(toggleCalendar(_:))),
+            ("Anımsatıcıları Göster", #selector(toggleReminders(_:))),
+            ("Okunmamışları Göster", #selector(toggleUnread(_:))),
+            ("3D Baskıyı Göster", #selector(toggleBambu(_:))),
+            ("Sistem Ölçümlerini Göster", #selector(toggleStats(_:))),
+            ("Ses Tuşlarını Devral", #selector(toggleVolumeKeys(_:))),
+            ("Zamanlayıcıyı Göster", #selector(toggleClock(_:))),
+        ]
+        for (title, action) in toggles {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
         let clear = NSMenuItem(title: "Etkinlikleri Temizle", action: #selector(clearActivities), keyEquivalent: "")
         clear.target = self
         menu.addItem(clear)
-        menu.addItem(.separator())
         let quit = NSMenuItem(title: "NotchIsland'dan Çık", action: #selector(quit), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
@@ -149,8 +179,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         menuOpen = true
-        menu.items[0].state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.items[1].state = calendar.enabled ? .on : .off
+        // Same order as the toggles above.
+        let states = [SMAppService.mainApp.status == .enabled, calendar.enabled, reminders.enabled,
+                      unread.enabled, bambu.enabled, stats.enabled, volumeKeys.enabled, model.showClock]
+        for (index, on) in states.enumerated() { menu.items[index].state = on ? .on : .off }
     }
 
     func menuDidClose(_ menu: NSMenu) { menuOpen = false }
@@ -168,6 +200,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleCalendar(_ sender: NSMenuItem) { calendar.setEnabled(!calendar.enabled) }
+
+    @objc private func toggleReminders(_ sender: NSMenuItem) { reminders.setEnabled(!reminders.enabled) }
+
+    @objc private func toggleUnread(_ sender: NSMenuItem) { unread.setEnabled(!unread.enabled) }
+
+    @objc private func toggleBambu(_ sender: NSMenuItem) { bambu.setEnabled(!bambu.enabled) }
+
+    @objc private func toggleStats(_ sender: NSMenuItem) { stats.setEnabled(!stats.enabled) }
+
+    @objc private func toggleVolumeKeys(_ sender: NSMenuItem) { volumeKeys.setEnabled(!volumeKeys.enabled) }
+
+    @objc private func toggleClock(_ sender: NSMenuItem) { model.showClock.toggle() }
 
     @objc private func clearActivities() { model.activities.removeAll() }
 

@@ -5,7 +5,8 @@ import Foundation
 /// Needs no permission, so it works as a play/pause signal when the player
 /// itself cannot be asked.
 enum AudioActivity {
-    static func isPlaying(bundleIDs: Set<String>) -> Bool {
+    /// True when a process whose bundle id starts with one of the prefixes is playing sound.
+    static func isPlaying(prefixes: [String]) -> Bool {
         let system = AudioObjectID(kAudioObjectSystemObject)
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
                                                  mScope: kAudioObjectPropertyScopeGlobal,
@@ -27,13 +28,8 @@ enum AudioActivity {
             address.mSelector = kAudioProcessPropertyBundleID
             guard AudioObjectGetPropertyData(process, &address, 0, nil, &bundleSize, &bundle) == noErr,
                   let name = bundle?.takeRetainedValue() as String? else { continue }
-            if bundleIDs.contains(name) { return true }
+            if prefixes.contains(where: { name.hasPrefix($0) }) { return true }
         }
         return false
-    }
-
-    /// Safari plays page audio from its WebKit helper process.
-    static var safariIsPlaying: Bool {
-        isPlaying(bundleIDs: ["com.apple.WebKit.GPU", "com.apple.Safari", "com.apple.WebKit.WebContent"])
     }
 }
