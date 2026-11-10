@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+NotchIsland.app/
+/notch
+.DS_Store
