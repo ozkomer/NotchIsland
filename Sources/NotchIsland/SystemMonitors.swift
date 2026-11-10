@@ -26,14 +26,38 @@ final class PrivacyMonitor {
         check()
     }
 
+    /// Apps whose use of the microphone means a call is in progress.
+    private static let callApps: [(prefix: String, name: String)] = [
+        ("us.zoom.xos", "Zoom"), ("com.microsoft.teams", "Teams"), ("com.apple.FaceTime", "FaceTime"),
+        ("com.apple.avconferenced", "FaceTime"), ("com.cisco.webexmeetingsapp", "Webex"),
+        ("Cisco-Systems.Spark", "Webex"),
+    ]
+    private static let browserPrefixes = ["com.apple.WebKit", "com.apple.Safari", "com.google.Chrome",
+                                          "com.brave.Browser", "com.microsoft.edgemac", "company.thebrowser.Browser"]
+
     private func check() {
-        let mic = microphoneUser()
-        if model.micApp != mic { model.micApp = mic }
+        let user = microphoneUser()
+        if model.micApp != user?.name { model.micApp = user?.name }
         let camera = cameraIsOn()
         if model.cameraOn != camera { model.cameraOn = camera }
+
+        // A call: a meeting app holds the microphone, or a browser does while a Meet tab is open.
+        var caller: String?
+        if let user {
+            if let match = Self.callApps.first(where: { user.bundleID.hasPrefix($0.prefix) }) {
+                caller = match.name
+            } else if model.meetBrowser != nil, Self.browserPrefixes.contains(where: { user.bundleID.hasPrefix($0) }) {
+                caller = "Google Meet"
+            }
+        }
+        if let caller {
+            if model.call?.app != caller { model.call = OngoingCall(app: caller, start: Date()) }
+        } else if model.call != nil {
+            model.call = nil
+        }
     }
 
-    private func microphoneUser() -> String? {
+    private func microphoneUser() -> (name: String, bundleID: String)? {
         let system = AudioObjectID(kAudioObjectSystemObject)
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
                                                  mScope: kAudioObjectPropertyScopeGlobal,
@@ -62,9 +86,11 @@ final class PrivacyMonitor {
             address.mSelector = kAudioProcessPropertyPID
             _ = AudioObjectGetPropertyData(process, &address, 0, nil, &pidSize, &pid)
 
-            if let name = NSRunningApplication(processIdentifier: pid)?.localizedName { return name }
-            if bundleID.hasPrefix("com.apple.WebKit") { return "Safari" }
-            return bundleID.components(separatedBy: ".").last.flatMap { $0.isEmpty ? nil : $0 } ?? "Bilinmeyen"
+            if let match = Self.callApps.first(where: { bundleID.hasPrefix($0.prefix) }) { return (match.name, bundleID) }
+            if bundleID.hasPrefix("com.apple.WebKit") { return ("Safari", bundleID) }
+            if let name = NSRunningApplication(processIdentifier: pid)?.localizedName { return (name, bundleID) }
+            let short = bundleID.components(separatedBy: ".").last.flatMap { $0.isEmpty ? nil : $0 } ?? "Bilinmeyen"
+            return (short, bundleID)
         }
         return nil
     }
@@ -145,6 +171,43 @@ final class VolumeMonitor {
         size = UInt32(MemoryLayout<UInt32>.size)
         _ = AudioObjectGetPropertyData(device, &Self.muteAddress, 0, nil, &size, &muted)
         return (volume, muted != 0)
+    }
+
+    // MARK: Changing the volume (used when the volume keys are taken over)
+
+    var canSet: Bool {
+        var settable: DarwinBoolean = false
+        return AudioObjectHasProperty(device, &Self.volumeAddress)
+            && AudioObjectIsPropertySettable(device, &Self.volumeAddress, &settable) == noErr
+            && settable.boolValue
+    }
+
+    func adjust(by delta: Float32) {
+        guard let now = read() else { return }
+        // Snap to the step grid so repeated presses land on the same levels.
+        let steps = (1 / abs(delta)).rounded()
+        var volume = ((now.volume * steps).rounded() + (delta > 0 ? 1 : -1)) / steps
+        volume = min(max(volume, 0), 1)
+        AudioObjectSetPropertyData(device, &Self.volumeAddress, 0, nil, UInt32(MemoryLayout<Float32>.size), &volume)
+        if delta > 0, now.muted { setMuted(false) }
+        flash()
+    }
+
+    func toggleMute() {
+        guard let now = read() else { return }
+        setMuted(!now.muted)
+        flash()
+    }
+
+    private func setMuted(_ muted: Bool) {
+        var value: UInt32 = muted ? 1 : 0
+        AudioObjectSetPropertyData(device, &Self.muteAddress, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
+    }
+
+    /// Shows the level even when it did not change (already at the top or bottom).
+    private func flash() {
+        last = nil
+        changed()
     }
 
     private func changed() {

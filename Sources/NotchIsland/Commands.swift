@@ -5,14 +5,24 @@ import SwiftUI
 /// app and exits, so scripts can show their own activities on the island.
 enum Commands {
     static let notification = NSNotification.Name("local.notchisland.command")
-    static let names: Set<String> = ["show", "done", "fail", "clear", "run", "help"]
+    static let names: Set<String> = ["show", "done", "fail", "clear", "run", "help", "debug",
+                                     "bambu-login", "bambu-token", "bambu-logout"]
+    /// Set by the app so a new Bambu sign-in takes effect at once.
+    static var onBambuReload: (() -> Void)?
+    static let debugFile = NSTemporaryDirectory() + "notchisland-state.txt"
+    /// Notes the controllers leave for `notch debug` (last script results and errors).
+    static var notes: [String: String] = [:]
 
     static let usage = """
     notch show <id> <başlık> [--progress 0-100] [--detail metin] [--icon sf.symbol] [--color renk]
-    notch done <id> [metin]      etkinliği kapatır, yeşil onay gösterir
+    notch done <id> [metin]      etkinliği kapatır, yeşil onay gösterir (--silent 1: sessiz)
     notch fail <id> [metin]      etkinliği kapatır, kırmızı hata gösterir
     notch clear <id>             etkinliği sessizce kaldırır
     notch run <başlık> -- <komut...>   komutu çalıştırır; süresini ve sonucunu gösterir
+
+    notch bambu-login            Bambu Lab hesabına giriş (3D baskı ilerlemesi için)
+    notch bambu-token            girişi tarayıcıdan alınan oturum belirteciyle yapar
+    notch bambu-logout           kayıtlı Bambu oturumunu siler
 
     Renkler: green red orange yellow blue cyan purple pink white
     """
@@ -31,6 +41,16 @@ enum Commands {
 
         case "run":
             return runWrapped(rest)
+
+        case "bambu-login", "bambu-token", "bambu-logout":
+            return BambuLogin.run(action)
+
+        case "debug":
+            try? FileManager.default.removeItem(atPath: debugFile)
+            post(["action": "debug", "id": "-"])
+            Thread.sleep(forTimeInterval: 0.4)
+            print((try? String(contentsOfFile: debugFile, encoding: .utf8)) ?? "Uygulama yanıt vermedi.")
+            return 0
 
         case "show", "done", "fail", "clear":
             guard !rest.isEmpty else {
@@ -136,16 +156,27 @@ enum Commands {
 
         case "done":
             model.removeActivity(id)
-            NSSound(named: "Glass")?.play()
+            if info["silent"] == nil { NSSound(named: "Glass")?.play() }
             model.show(Banner(icon: "checkmark.circle.fill", tint: .green, text: text.isEmpty ? "Bitti" : text), for: 5)
 
         case "fail":
             model.removeActivity(id)
-            NSSound(named: "Basso")?.play()
+            if info["silent"] == nil { NSSound(named: "Basso")?.play() }
             model.show(Banner(icon: "xmark.octagon.fill", tint: .red, text: text.isEmpty ? "Hata" : text), for: 8)
 
         case "clear":
             model.removeActivity(id)
+
+        case "bambu-reload":
+            onBambuReload?()
+
+        case "debug":
+            var lines = ["track: \(model.track.map { "\($0.source.rawValue) (\($0.artist)) playing=\($0.isPlaying) showWhenPaused=\($0.showWhenPaused)" } ?? "none")",
+                         "call: \(model.call?.app ?? "-") unread: \(model.unread.map { "\($0.name)=\($0.count)" }.joined(separator: " "))",
+                         "slots: \(model.slots.count) activities: \(model.activities.count) banner: \(model.banner != nil)",
+                         "mic: \(model.micApp ?? "-") camera: \(model.cameraOn)"]
+            lines += notes.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }
+            try? lines.joined(separator: "\n").write(toFile: debugFile, atomically: true, encoding: .utf8)
 
         default:
             break
